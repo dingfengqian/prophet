@@ -5,8 +5,15 @@
 \title{Add a seasonal component with specified period, number of Fourier
 components, and prior scale.}
 \usage{
-add_seasonality(m, name, period, fourier.order, prior.scale = NULL,
-  mode = NULL)
+add_seasonality(
+  m,
+  name,
+  period,
+  fourier.order,
+  prior.scale = NULL,
+  mode = NULL,
+  condition.name = NULL
+)
 }
 \arguments{
 \item{m}{Prophet object.}
@@ -20,6 +27,8 @@ add_seasonality(m, name, period, fourier.order, prior.scale = NULL,
 \item{prior.scale}{Optional float prior scale for this component.}
 
 \item{mode}{Optional 'additive' or 'multiplicative'.}
+
+\item{condition.name}{String name of the seasonality condition.}
 }
 \value{
 The prophet model with the seasonality added.
@@ -38,4 +47,8 @@ Mode can be specified as either 'additive' or 'multiplicative'. If not
 specified, m$seasonality.mode will be used (defaults to 'additive').
 Additive means the seasonality will be added to the trend, multiplicative
 means it will multiply the trend.
+
+If condition.name is provided, the dataframe passed to `fit` and `predict`
+should have a column with the specified condition.name containing booleans
+which decides when to apply seasonality.
 }

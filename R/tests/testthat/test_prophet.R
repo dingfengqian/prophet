@@ -1,3 +1,8 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
+
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 library(prophet)
 context("Prophet tests")
 
@@ -28,8 +33,13 @@ test_that("fit_predict_no_changepoints", {
   expect_warning({
     # warning from prophet(), error from predict()
     m <- prophet(train, n.changepoints = 0)
-    expect_error(predict(m, future), NA)
   })
+  fcst <- predict(m, future)
+
+  expect_warning({
+    m <- prophet(train, n.changepoints = 0, mcmc.samples = 100)
+  })
+  fcst <- predict(m, future)
 })
 
 test_that("fit_predict_changepoint_not_in_history", {
@@ -68,6 +78,16 @@ test_that("fit_predict_constant_history", {
   expect_equal(tail(fcst$yhat, 1), 0)
 })
 
+test_that("fit_predict_uncertainty_disabled", {
+  skip_if_not(Sys.getenv('R_ARCH') != '/i386')
+  for (uncertainty in c(0, FALSE)) {
+    m <- prophet(train, uncertainty.samples = uncertainty)
+    fcst <- predict(m, future)
+    expected.cols <- c('ds', 'trend', 'additive_terms', 'weekly', 'multiplicative_terms', 'yhat')
+    expect_equal(expected.cols, colnames(fcst))
+  }
+})
+
 test_that("setup_dataframe", {
   history <- train
   m <- prophet(history, fit = FALSE)
@@ -81,6 +101,18 @@ test_that("setup_dataframe", {
 
   expect_true('y_scaled' %in% colnames(history))
   expect_equal(max(history$y_scaled), 1)
+})
+
+test_that("setup_names_errors", {
+  m <- prophet()
+  expect_error(
+    m <- add_seasonality(m, "3monthly"),
+    "You have provided a name that is not syntactically valid in R, 3monthly"
+  )
+  expect_error(
+    m <- add_regressor(m, "2monthsale"),
+    "You have provided a name that is not syntactically valid in R, 2monthsale"
+  )
 })
 
 test_that("logistic_floor", {
@@ -97,6 +129,7 @@ test_that("logistic_floor", {
   expect_true(m$logistic.floor)
   expect_true('floor' %in% colnames(m$history))
   expect_equal(m$history$y_scaled[1], 1., tolerance = 1e-6)
+  expect_equal(m$fit.kwargs, list(algorithm = 'Newton'))
   fcst1 <- predict(m, future1)
 
   m2 <- prophet(growth = 'logistic')
@@ -415,7 +448,8 @@ test_that("auto_weekly_seasonality", {
   m <- fit.prophet(m, train.w)
   expect_true('weekly' %in% names(m$seasonalities))
   true <- list(
-    period = 7, fourier.order = 3, prior.scale = 10, mode = 'additive')
+    period = 7, fourier.order = 3, prior.scale = 10, mode = 'additive',
+    condition.name = NULL)
   for (name in names(true)) {
     expect_equal(m$seasonalities$weekly[[name]], true[[name]])
   }
@@ -424,18 +458,17 @@ test_that("auto_weekly_seasonality", {
   train.w <- DATA[1:N.w, ]
   m <- prophet(train.w)
   expect_false('weekly' %in% names(m$seasonalities))
-  expect_warning({
-    # prophet warning: non-zero return code in optimizing
-    m <- prophet(train.w, weekly.seasonality = TRUE)
-    expect_true('weekly' %in% names(m$seasonalities))
-  })
+  # prophet warning: non-zero return code in optimizing
+  m <- prophet(train.w, weekly.seasonality = TRUE)
+  expect_true('weekly' %in% names(m$seasonalities))
   # Should be False due to weekly spacing
   train.w <- DATA[seq(1, nrow(DATA), 7), ]
   m <- prophet(train.w)
   expect_false('weekly' %in% names(m$seasonalities))
   m <- prophet(DATA, weekly.seasonality = 2, seasonality.prior.scale = 3)
   true <- list(
-    period = 7, fourier.order = 2, prior.scale = 3, mode = 'additive')
+    period = 7, fourier.order = 2, prior.scale = 3, mode = 'additive',
+    condition.name = NULL)
   for (name in names(true)) {
     expect_equal(m$seasonalities$weekly[[name]], true[[name]])
   }
@@ -449,7 +482,8 @@ test_that("auto_yearly_seasonality", {
   m <- fit.prophet(m, DATA)
   expect_true('yearly' %in% names(m$seasonalities))
   true <- list(
-    period = 365.25, fourier.order = 10, prior.scale = 10, mode = 'additive')
+    period = 365.25, fourier.order = 10, prior.scale = 10, mode = 'additive',
+    condition.name = NULL)
   for (name in names(true)) {
     expect_equal(m$seasonalities$yearly[[name]], true[[name]])
   }
@@ -462,7 +496,8 @@ test_that("auto_yearly_seasonality", {
   expect_true('yearly' %in% names(m$seasonalities))
   m <- prophet(DATA, yearly.seasonality = 7, seasonality.prior.scale = 3)
   true <- list(
-    period = 365.25, fourier.order = 7, prior.scale = 3, mode = 'additive')
+    period = 365.25, fourier.order = 7, prior.scale = 3, mode = 'additive',
+    condition.name = NULL)
   for (name in names(true)) {
     expect_equal(m$seasonalities$yearly[[name]], true[[name]])
   }
@@ -476,7 +511,8 @@ test_that("auto_daily_seasonality", {
   m <- fit.prophet(m, DATA2)
   expect_true('daily' %in% names(m$seasonalities))
   true <- list(
-    period = 1, fourier.order = 4, prior.scale = 10, mode = 'additive')
+    period = 1, fourier.order = 4, prior.scale = 10, mode = 'additive',
+    condition.name = NULL)
   for (name in names(true)) {
     expect_equal(m$seasonalities$daily[[name]], true[[name]])
   }
@@ -489,7 +525,8 @@ test_that("auto_daily_seasonality", {
   expect_true('daily' %in% names(m$seasonalities))
   m <- prophet(DATA2, daily.seasonality = 7, seasonality.prior.scale = 3)
   true <- list(
-    period = 1, fourier.order = 7, prior.scale = 3, mode = 'additive')
+    period = 1, fourier.order = 7, prior.scale = 3, mode = 'additive',
+    condition.name = NULL)
   for (name in names(true)) {
     expect_equal(m$seasonalities$daily[[name]], true[[name]])
   }
@@ -512,17 +549,24 @@ test_that("custom_seasonality", {
                          holiday = c('special_day'),
                          prior_scale = c(4))
   m <- prophet(holidays=holidays)
+  expect_error(
+    add_seasonality(m, name="incorrect.fourier.order", period=30, fourier.order=-10),
+    "Fourier order must be > 0."
+  )
   m <- add_seasonality(m, name='monthly', period=30, fourier.order=5)
   true <- list(
-    period = 30, fourier.order = 5, prior.scale = 10, mode = 'additive')
+    period = 30, fourier.order = 5, prior.scale = 10, mode = 'additive',
+    condition.name = NULL)
   for (name in names(true)) {
     expect_equal(m$seasonalities$monthly[[name]], true[[name]])
   }
   expect_error(
-    add_seasonality(m, name='special_day', period=30, fourier_order=5)
+    add_seasonality(m, name='special_day', period=30, fourier.order=5),
+    "already used for a holiday."
   )
   expect_error(
-    add_seasonality(m, name='trend', period=30, fourier_order=5)
+    add_seasonality(m, name='trend', period=30, fourier.order=5),
+    "is reserved."
   )
   m <- add_seasonality(m, name='weekly', period=30, fourier.order=5)
   # Test priors
@@ -546,6 +590,46 @@ test_that("custom_seasonality", {
   expect_equal(sum(component.cols$monthly[1:11]), 10)
   expect_equal(sum(component.cols$weekly[11:17]), 6)
   expect_true(all(prior.scales == c(rep(2, 10), rep(10, 6), 4)))
+})
+
+test_that("conditional_custom_seasonality", {
+  skip_if_not(Sys.getenv('R_ARCH') != '/i386')
+  m <- prophet(weekly_seasonality=FALSE, yearly_seasonality=FALSE)
+  m <- add_seasonality(m, name='conditional_weekly', period=7, fourier.order=3,
+                       prior.scale=2., condition.name='is_conditional_week')
+  m <- add_seasonality(m, name='normal_monthly', period=30.5, fourier.order=5,
+                       prior.scale=2.)
+  df <- DATA
+  # Require all conditions names in df
+  expect_error(
+    fit.prophet(m, df)
+  )
+  df$is_conditional_week <- c(rep(0, 255), rep(2, 255))
+  # Require boolean compatible values
+  expect_error(
+    fit.prophet(m, df)
+  )
+  df$is_conditional_week <- c(rep(0, 255), rep(1, 255))
+  fit.prophet(m, df)
+  true <- list(
+    period = 7, fourier.order = 3, prior.scale = 2., mode = 'additive', 
+    condition.name = 'is_conditional_week')
+  for (name in names(true)) {
+    expect_equal(m$seasonalities[['conditional_weekly']][[name]], true[[name]])
+  }
+  expect_equal(
+    m$seasonalities[['normal_monthly']]$condition.name, NULL
+  )
+  out <- prophet:::make_all_seasonality_features(m, df)
+  #Confirm that only values without is_conditional_week has non zero entries
+  nonzero.weekly = out$seasonal.features %>%
+    dplyr::select(dplyr::starts_with('conditional_weekly')) %>%
+    dplyr::mutate_all(~ . != 0) %>%
+    dplyr::mutate(nonzero = rowSums(. != 0) > 0) %>% 
+    dplyr::pull(nonzero)
+  expect_equal(
+    nonzero.weekly, as.logical(df$is_conditional_week)
+  )
 })
 
 test_that("added_regressors", {

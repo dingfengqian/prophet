@@ -1,9 +1,7 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# Copyright (c) Facebook, Inc. and its affiliates.
+
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -13,9 +11,11 @@ from __future__ import unicode_literals
 import itertools
 import os
 from unittest import TestCase
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import datetime
 
 from fbprophet import Prophet
 from fbprophet import diagnostics
@@ -40,25 +40,49 @@ class TestDiagnostics(TestCase):
         horizon = pd.Timedelta('4 days')
         period = pd.Timedelta('10 days')
         initial = pd.Timedelta('115 days')
-        df_cv = diagnostics.cross_validation(
-            m, horizon='4 days', period='10 days', initial='115 days')
-        self.assertEqual(len(np.unique(df_cv['cutoff'])), 3)
-        self.assertEqual(max(df_cv['ds'] - df_cv['cutoff']), horizon)
-        self.assertTrue(min(df_cv['cutoff']) >= min(self.__df['ds']) + initial)
-        dc = df_cv['cutoff'].diff()
-        dc = dc[dc > pd.Timedelta(0)].min()
-        self.assertTrue(dc >= period)
-        self.assertTrue((df_cv['cutoff'] < df_cv['ds']).all())
-        # Each y in df_cv and self.__df with same ds should be equal
-        df_merged = pd.merge(df_cv, self.__df, 'left', on='ds')
-        self.assertAlmostEqual(
-            np.sum((df_merged['y_x'] - df_merged['y_y']) ** 2), 0.0)
-        df_cv = diagnostics.cross_validation(
-            m, horizon='4 days', period='10 days', initial='135 days')
-        self.assertEqual(len(np.unique(df_cv['cutoff'])), 1)
-        with self.assertRaises(ValueError):
-            diagnostics.cross_validation(
-                m, horizon='10 days', period='10 days', initial='140 days')
+        # Run for both cases of multiprocess on or off
+        for multiprocess in [False, True]:
+            df_cv = diagnostics.cross_validation(
+                m, horizon='4 days', period='10 days', initial='115 days',
+                multiprocess=multiprocess)
+            self.assertEqual(len(np.unique(df_cv['cutoff'])), 3)
+            self.assertEqual(max(df_cv['ds'] - df_cv['cutoff']), horizon)
+            self.assertTrue(min(df_cv['cutoff']) >= min(self.__df['ds']) + initial)
+            dc = df_cv['cutoff'].diff()
+            dc = dc[dc > pd.Timedelta(0)].min()
+            self.assertTrue(dc >= period)
+            self.assertTrue((df_cv['cutoff'] < df_cv['ds']).all())
+            # Each y in df_cv and self.__df with same ds should be equal
+            df_merged = pd.merge(df_cv, self.__df, 'left', on='ds')
+            self.assertAlmostEqual(
+                np.sum((df_merged['y_x'] - df_merged['y_y']) ** 2), 0.0)
+            df_cv = diagnostics.cross_validation(
+                m, horizon='4 days', period='10 days', initial='135 days')
+            self.assertEqual(len(np.unique(df_cv['cutoff'])), 1)
+            with self.assertRaises(ValueError):
+                diagnostics.cross_validation(
+                    m, horizon='10 days', period='10 days', initial='140 days')
+
+    def test_check_single_cutoff_forecast_func_calls(self):
+        m = Prophet()
+        m.fit(self.__df)
+        mock_predict = pd.DataFrame({'ds':pd.date_range(start='2012-09-17', periods=3),
+                                     'yhat':np.arange(16, 19),
+                                     'yhat_lower':np.arange(15, 18),
+                                     'yhat_upper': np.arange(17, 20),
+                                      'y': np.arange(16.5, 19.5),
+                                     'cutoff': [datetime.date(2012, 9, 15)]*3})
+
+        # cross validation  with 3 and 7 forecasts
+        for args, forecasts in ((['4 days', '10 days', '115 days'], 3),
+                            (['4 days', '4 days', '115 days'], 7)):
+            with patch('fbprophet.diagnostics.single_cutoff_forecast') as mock_func:
+                mock_func.return_value = mock_predict
+                df_cv = diagnostics.cross_validation(m, *args)
+                # check single forecast function called expected number of times
+                self.assertEqual(diagnostics.single_cutoff_forecast.call_count,
+                                 forecasts)
+
 
     def test_cross_validation_logistic(self):
         df = self.__df.copy()
@@ -75,8 +99,11 @@ class TestDiagnostics(TestCase):
     def test_cross_validation_extra_regressors(self):
         df = self.__df.copy()
         df['extra'] = range(df.shape[0])
+        df['is_conditional_week'] = np.arange(df.shape[0]) // 7 % 2
         m = Prophet()
         m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+        m.add_seasonality(name='conditional_weekly', period=7, fourier_order=3,
+                          prior_scale=2., condition_name='is_conditional_week')
         m.add_regressor('extra')
         m.fit(df)
         df_cv = diagnostics.cross_validation(
@@ -104,27 +131,56 @@ class TestDiagnostics(TestCase):
         self.assertAlmostEqual(
             ((df_cv1['yhat'] - df_cv2['yhat']) ** 2).sum(), 0.0)
 
+    def test_cross_validation_custom_cutoffs(self):
+        m = Prophet()
+        m.fit(self.__df)
+        # When specify a list of cutoffs
+        #  the cutoff dates in df_cv are those specified
+        df_cv1 = diagnostics.cross_validation(
+            m,
+            horizon='32 days',
+            period='10 days',
+            cutoffs=[pd.Timestamp('2012-07-31'), pd.Timestamp('2012-08-31')])
+        self.assertEqual(len(df_cv1['cutoff'].unique()), 2)
+      
+    def test_cross_validation_uncertainty_disabled(self):
+        df = self.__df.copy()
+        for uncertainty in [0, False]:
+            m = Prophet(uncertainty_samples=uncertainty)
+            m.fit(df, algorithm='Newton')
+            df_cv = diagnostics.cross_validation(
+                m, horizon='4 days', period='4 days', initial='115 days')
+            expected_cols = ['ds', 'yhat', 'y', 'cutoff']
+            self.assertTrue(all(col in expected_cols for col in df_cv.columns.tolist()))
+            df_p = diagnostics.performance_metrics(df_cv)
+            self.assertTrue('coverage' not in df_p.columns)
+
     def test_performance_metrics(self):
         m = Prophet()
         m.fit(self.__df)
         df_cv = diagnostics.cross_validation(
             m, horizon='4 days', period='10 days', initial='90 days')
         # Aggregation level none
-        df_none = diagnostics.performance_metrics(df_cv, rolling_window=0)
+        df_none = diagnostics.performance_metrics(df_cv, rolling_window=-1)
         self.assertEqual(
             set(df_none.columns),
-            {'horizon', 'coverage', 'mae', 'mape', 'mse', 'rmse'},
+            {'horizon', 'coverage', 'mae', 'mape', 'mdape', 'mse', 'rmse'},
         )
         self.assertEqual(df_none.shape[0], 16)
+        # Aggregation level 0
+        df_0 = diagnostics.performance_metrics(df_cv, rolling_window=0)
+        self.assertEqual(len(df_0), 4)
+        self.assertEqual(len(df_0['horizon'].unique()), 4)
         # Aggregation level 0.2
         df_horizon = diagnostics.performance_metrics(df_cv, rolling_window=0.2)
+        self.assertEqual(len(df_horizon), 4)
         self.assertEqual(len(df_horizon['horizon'].unique()), 4)
-        self.assertEqual(df_horizon.shape[0], 14)
         # Aggregation level all
         df_all = diagnostics.performance_metrics(df_cv, rolling_window=1)
         self.assertEqual(df_all.shape[0], 1)
         for metric in ['mse', 'mape', 'mae', 'coverage']:
-            self.assertEqual(df_all[metric].values[0], df_none[metric].mean())
+            self.assertAlmostEqual(df_all[metric].values[0], df_none[metric].mean())
+        self.assertAlmostEqual(df_all['mdape'].values[0], df_none['mdape'].median())
         # Custom list of metrics
         df_horizon = diagnostics.performance_metrics(
             df_cv, metrics=['coverage', 'mse'],
@@ -133,6 +189,69 @@ class TestDiagnostics(TestCase):
             set(df_horizon.columns),
             {'coverage', 'mse', 'horizon'},
         )
+        # Skip MAPE
+        df_cv.loc[0, 'y'] = 0.
+        df_horizon = diagnostics.performance_metrics(
+            df_cv, metrics=['coverage', 'mape'],
+        )
+        self.assertEqual(
+            set(df_horizon.columns),
+            {'coverage', 'horizon'},
+        )
+        df_horizon = diagnostics.performance_metrics(
+            df_cv, metrics=['mape'],
+        )
+        self.assertIsNone(df_horizon)
+        # List of metrics containing non-valid metrics
+        with self.assertRaises(ValueError):
+            diagnostics.performance_metrics(
+                df_cv, metrics=['mse', 'error_metric'],
+            )
+
+    def test_rolling_mean(self):
+        x = np.arange(10)
+        h = np.arange(10)
+        df = diagnostics.rolling_mean_by_h(x=x, h=h, w=1, name='x')
+        self.assertTrue(np.array_equal(x, df['x'].values))
+        self.assertTrue(np.array_equal(h, df['horizon'].values))
+
+        df = diagnostics.rolling_mean_by_h(x, h, w=4, name='x')
+        self.assertTrue(np.allclose(x[3:] - 1.5, df['x'].values))
+        self.assertTrue(np.array_equal(np.arange(3, 10), df['horizon'].values))
+
+        h = np.array([1., 2., 3., 4., 4., 4., 4., 4., 7., 7.])
+        x_true = np.array([1.0, 5.0 , 22. / 3])
+        h_true = np.array([3., 4., 7.])
+        df = diagnostics.rolling_mean_by_h(x, h, w=3, name='x')
+        self.assertTrue(np.allclose(x_true, df['x'].values))
+        self.assertTrue(np.array_equal(h_true, df['horizon'].values))
+
+        df = diagnostics.rolling_mean_by_h(x, h, w=10, name='x')
+        self.assertTrue(np.allclose(np.array([7.]), df['horizon'].values))
+        self.assertTrue(np.allclose(np.array([4.5]), df['x'].values))
+
+    def test_rolling_median(self):
+        x = np.arange(10)
+        h = np.arange(10)
+        df = diagnostics.rolling_median_by_h(x=x, h=h, w=1, name='x')
+        self.assertTrue(np.array_equal(x, df['x'].values))
+        self.assertTrue(np.array_equal(h, df['horizon'].values))
+
+        df = diagnostics.rolling_median_by_h(x, h, w=4, name='x')
+        x_true = x[3:] - 1.5
+        self.assertTrue(np.allclose(x_true, df['x'].values))
+        self.assertTrue(np.array_equal(np.arange(3, 10), df['horizon'].values))
+
+        h = np.array([1., 2., 3., 4., 4., 4., 4., 4., 7., 7.])
+        x_true = np.array([1.0, 5.0, 8.0])
+        h_true = np.array([3., 4., 7.])
+        df = diagnostics.rolling_median_by_h(x, h, w=3, name='x')
+        self.assertTrue(np.allclose(x_true, df['x'].values))
+        self.assertTrue(np.array_equal(h_true, df['horizon'].values))
+
+        df = diagnostics.rolling_median_by_h(x, h, w=10, name='x')
+        self.assertTrue(np.allclose(np.array([7.]), df['horizon'].values))
+        self.assertTrue(np.allclose(np.array([4.5]), df['x'].values))
 
     def test_copy(self):
         df = DATA_all.copy()
@@ -185,8 +304,10 @@ class TestDiagnostics(TestCase):
                 self.assertTrue((m1.holidays == m2.holidays).values.all())
             self.assertEqual(m1.country_holidays, m2.country_holidays)
             self.assertEqual(m1.seasonality_mode, m2.seasonality_mode)
-            self.assertEqual(m1.seasonality_prior_scale, m2.seasonality_prior_scale)
-            self.assertEqual(m1.changepoint_prior_scale, m2.changepoint_prior_scale)
+            self.assertEqual(m1.seasonality_prior_scale,
+                             m2.seasonality_prior_scale)
+            self.assertEqual(m1.changepoint_prior_scale,
+                             m2.changepoint_prior_scale)
             self.assertEqual(m1.holidays_prior_scale, m2.holidays_prior_scale)
             self.assertEqual(m1.mcmc_samples, m2.mcmc_samples)
             self.assertEqual(m1.interval_width, m2.interval_width)
@@ -204,3 +325,4 @@ class TestDiagnostics(TestCase):
         self.assertTrue((changepoints == m2.changepoints).all())
         self.assertTrue('custom' in m2.seasonalities)
         self.assertTrue('binary_feature' in m2.extra_regressors)
+

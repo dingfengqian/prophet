@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# Copyright (c) Facebook, Inc. and its affiliates.
+
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import, division, print_function
 
@@ -36,13 +34,13 @@ def get_holiday_names(country):
     except AttributeError:
         try:
             holiday_names = getattr(hdays_part1, country)(years=years).values()
-        except AttributeError:
+        except AttributeError as e:
             raise AttributeError(
-                "Holidays in {} are not currently supported!".format(country))
+                "Holidays in {} are not currently supported!".format(country)) from e
     return set(holiday_names)
 
 
-def make_holidays_df(year_list, country):
+def make_holidays_df(year_list, country, province=None):
     """Make dataframe of holidays for given years and countries
 
     Parameters
@@ -59,10 +57,10 @@ def make_holidays_df(year_list, country):
         holidays = getattr(hdays_part2, country)(years=year_list)
     except AttributeError:
         try:
-            holidays = getattr(hdays_part1, country)(years=year_list)
-        except AttributeError:
+            holidays = getattr(hdays_part1, country)(prov=province,years=year_list)
+        except AttributeError as e:
             raise AttributeError(
-                "Holidays in {} are not currently supported!".format(country))
+                "Holidays in {} are not currently supported!".format(country)) from e
     holidays_df = pd.DataFrame(list(holidays.items()), columns=['ds', 'holiday'])
     holidays_df.reset_index(inplace=True, drop=True)
     holidays_df['ds'] = pd.to_datetime(holidays_df['ds'])

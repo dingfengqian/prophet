@@ -1,9 +1,7 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# Copyright (c) Facebook, Inc. and its affiliates.
+
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -11,12 +9,13 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import os
-from unittest import TestCase
+import sys
+from unittest import TestCase, skipUnless
 
 import numpy as np
 import pandas as pd
-
 from fbprophet import Prophet
+
 
 DATA = pd.read_csv(
     os.path.join(os.path.dirname(__file__), 'data.csv'),
@@ -30,21 +29,67 @@ DATA2 = pd.read_csv(
 
 class TestProphet(TestCase):
 
+    @staticmethod
+    def rmse(predictions, targets):
+        return np.sqrt(np.mean((predictions - targets) ** 2))
+
     def test_fit_predict(self):
+        days = 30
         N = DATA.shape[0]
-        train = DATA.head(N // 2)
-        future = DATA.tail(N // 2)
+        train = DATA.head(N - days)
+        test = DATA.tail(days)
+        test.reset_index(inplace=True)
 
         forecaster = Prophet()
-        forecaster.fit(train)
-        forecaster.predict(future)
+        forecaster.fit(train, seed=1237861298)
+        np.random.seed(876543987)
+        future = forecaster.make_future_dataframe(days, include_history=False)
+        future = forecaster.predict(future)
+        # this gives ~ 10.64
+        res = self.rmse(future['yhat'], test['y'])
+        self.assertTrue(15 > res > 5, msg="backend: {}".format(forecaster.stan_backend))
+
+    def test_fit_predict_newton(self):
+        days = 30
+        N = DATA.shape[0]
+        train = DATA.head(N - days)
+        test = DATA.tail(days)
+        test.reset_index(inplace=True)
+
+        forecaster = Prophet()
+        forecaster.fit(train, seed=1237861298, algorithm='Newton')
+        np.random.seed(876543987)
+        future = forecaster.make_future_dataframe(days, include_history=False)
+        future = forecaster.predict(future)
+        # this gives ~ 10.64
+        res = self.rmse(future['yhat'], test['y'])
+        self.assertAlmostEqual(res, 23.44, places=2, msg="backend: {}".format(forecaster.stan_backend))
+
+    @skipUnless("--test-slow" in sys.argv, "Skipped due to the lack of '--test-slow' argument")
+    def test_fit_sampling_predict(self):
+        days = 30
+        N = DATA.shape[0]
+        train = DATA.head(N - days)
+        test = DATA.tail(days)
+        test.reset_index(inplace=True)
+
+        forecaster = Prophet(mcmc_samples=500)
+
+        forecaster.fit(train, seed=1237861298, chains=4)
+        np.random.seed(876543987)
+        future = forecaster.make_future_dataframe(days, include_history=False)
+        future = forecaster.predict(future)
+        # this gives ~ 215.77
+        res = self.rmse(future['yhat'], test['y'])
+        self.assertTrue(236 > res > 193, msg="backend: {}".format(forecaster.stan_backend))
 
     def test_fit_predict_no_seasons(self):
         N = DATA.shape[0]
         train = DATA.head(N // 2)
         future = DATA.tail(N // 2)
 
-        forecaster = Prophet(weekly_seasonality=False, yearly_seasonality=False)
+        forecaster = Prophet(weekly_seasonality=False,
+                             yearly_seasonality=False)
         forecaster.fit(train)
         forecaster.predict(future)
 
@@ -57,10 +102,15 @@ class TestProphet(TestCase):
         forecaster.fit(train)
         forecaster.predict(future)
 
+        forecaster = Prophet(n_changepoints=0, mcmc_samples=100)
+        forecaster.fit(train)
+        forecaster.predict(future)
+
     def test_fit_changepoint_not_in_history(self):
         train = DATA[(DATA['ds'] < '2013-01-01') | (DATA['ds'] > '2014-01-01')]
         future = pd.DataFrame({'ds': DATA['ds']})
-        forecaster = Prophet(changepoints=['2013-06-06'])
+        prophet = Prophet(changepoints=['2013-06-06'])
+        forecaster = prophet
         forecaster.fit(train)
         forecaster.predict(future)
 
@@ -91,6 +141,20 @@ class TestProphet(TestCase):
         fcst = m.predict(future)
         self.assertEqual(fcst['yhat'].values[-1], 0)
 
+    def test_fit_predict_uncertainty_disabled(self):
+        N = DATA.shape[0]
+        train = DATA.head(N // 2)
+        future = DATA.tail(N // 2)
+
+        for uncertainty in [0, False]:
+            m = Prophet(uncertainty_samples=uncertainty)
+            m.fit(train)
+            fcst = m.predict(future)
+            expected_cols = ['ds', 'trend', 'additive_terms',
+                             'multiplicative_terms', 'weekly', 'yhat']
+            self.assertTrue(all(col in expected_cols
+                                for col in fcst.columns.tolist()))
+
     def test_setup_dataframe(self):
         m = Prophet()
         N = DATA.shape[0]
@@ -105,6 +169,13 @@ class TestProphet(TestCase):
         self.assertTrue('y_scaled' in history)
         self.assertEqual(history['y_scaled'].max(), 1.0)
 
+    def test_setup_dataframe_ds_column(self):
+        "Test case where 'ds' exists as an index name and column"
+        df = DATA.copy()
+        df.index = df.loc[:, 'ds']
+        m = Prophet()
+        m.fit(df)
+
     def test_logistic_floor(self):
         m = Prophet(growth='logistic')
         N = DATA.shape[0]
@@ -118,6 +189,7 @@ class TestProphet(TestCase):
         self.assertTrue(m.logistic_floor)
         self.assertTrue('floor' in m.history)
         self.assertAlmostEqual(m.history['y_scaled'][0], 1.)
+        self.assertEqual(m.fit_kwargs, {'algorithm': 'Newton'})
         fcst1 = m.predict(future)
 
         m2 = Prophet(growth='logistic')
@@ -201,17 +273,17 @@ class TestProphet(TestCase):
         mat = Prophet.fourier_series(DATA['ds'], 7, 3)
         # These are from the R forecast package directly.
         true_values = np.array([
-            0.7818315, 0.6234898, 0.9749279, -0.2225209, 0.4338837, -0.9009689,
+            0.7818315, 0.6234898, 0.9749279, -0.2225209, 0.4338837, -0.9009689
         ])
-        self.assertAlmostEqual(np.sum((mat[0] - true_values)**2), 0.0)
+        self.assertAlmostEqual(np.sum((mat[0] - true_values) ** 2), 0.0)
 
     def test_fourier_series_yearly(self):
         mat = Prophet.fourier_series(DATA['ds'], 365.25, 3)
         # These are from the R forecast package directly.
         true_values = np.array([
-            0.7006152, -0.7135393, -0.9998330, 0.01827656, 0.7262249, 0.6874572,
+            0.7006152, -0.7135393, -0.9998330, 0.01827656, 0.7262249, 0.6874572
         ])
-        self.assertAlmostEqual(np.sum((mat[0] - true_values)**2), 0.0)
+        self.assertAlmostEqual(np.sum((mat[0] - true_values) ** 2), 0.0)
 
     def test_growth_init(self):
         model = Prophet(growth='logistic')
@@ -320,7 +392,7 @@ class TestProphet(TestCase):
             'upper_window': [1] * 2,
             'prior_scale': [8] * 2,
         })
-        holidays2 = pd.concat((holidays, holidays2))
+        holidays2 = pd.concat((holidays, holidays2), sort=True)
         m = Prophet(holidays=holidays2)
         feats, priors, names = m.make_holiday_features(df['ds'], m.holidays)
         pn = zip(priors, [s.split('_delim_')[0] for s in feats.columns])
@@ -332,7 +404,7 @@ class TestProphet(TestCase):
             'lower_window': [0] * 2,
             'upper_window': [1] * 2,
         })
-        holidays2 = pd.concat((holidays, holidays2))
+        holidays2 = pd.concat((holidays, holidays2), sort=True)
         feats, priors, names = Prophet(
             holidays=holidays2, holidays_prior_scale=4
         ).make_holiday_features(df['ds'], holidays2)
@@ -416,6 +488,7 @@ class TestProphet(TestCase):
                 'fourier_order': 3,
                 'prior_scale': 10.,
                 'mode': 'additive',
+                'condition_name': None
             },
         )
         # Should be disabled due to too short history
@@ -441,6 +514,7 @@ class TestProphet(TestCase):
                 'fourier_order': 2,
                 'prior_scale': 3.,
                 'mode': 'additive',
+                'condition_name': None
             },
         )
 
@@ -457,6 +531,7 @@ class TestProphet(TestCase):
                 'fourier_order': 10,
                 'prior_scale': 10.,
                 'mode': 'additive',
+                'condition_name': None
             },
         )
         # Should be disabled due to too short history
@@ -477,6 +552,7 @@ class TestProphet(TestCase):
                 'fourier_order': 7,
                 'prior_scale': 3.,
                 'mode': 'additive',
+                'condition_name': None
             },
         )
 
@@ -493,6 +569,7 @@ class TestProphet(TestCase):
                 'fourier_order': 4,
                 'prior_scale': 10.,
                 'mode': 'additive',
+                'condition_name': None
             },
         )
         # Should be disabled due to too short history
@@ -513,6 +590,7 @@ class TestProphet(TestCase):
                 'fourier_order': 7,
                 'prior_scale': 3.,
                 'mode': 'additive',
+                'condition_name': None
             },
         )
         m = Prophet()
@@ -545,6 +623,7 @@ class TestProphet(TestCase):
                 'fourier_order': 5,
                 'prior_scale': 2.,
                 'mode': 'additive',
+                'condition_name': None
             },
         )
         with self.assertRaises(ValueError):
@@ -552,10 +631,16 @@ class TestProphet(TestCase):
         with self.assertRaises(ValueError):
             m.add_seasonality(name='trend', period=30, fourier_order=5)
         m.add_seasonality(name='weekly', period=30, fourier_order=5)
+        # Test fourier order <= 0
+        m = Prophet()
+        with self.assertRaises(ValueError):
+            m.add_seasonality(name='weekly', period=7, fourier_order=0)
+        with self.assertRaises(ValueError):
+            m.add_seasonality(name='weekly', period=7, fourier_order=-1)
         # Test priors
         m = Prophet(
             holidays=holidays, yearly_seasonality=False,
-            seasonality_mode='multiplicative',
+            seasonality_mode='multiplicative'
         )
         m.add_seasonality(name='monthly', period=30, fourier_order=5,
                           prior_scale=2., mode='additive')
@@ -579,6 +664,42 @@ class TestProphet(TestCase):
             self.assertEqual(sum(component_cols['weekly'][:6]), 6)
             self.assertEqual(sum(component_cols['monthly'][6:16]), 10)
         self.assertEqual(prior_scales, true)
+
+    def test_conditional_custom_seasonality(self):
+        m = Prophet(weekly_seasonality=False, yearly_seasonality=False)
+        m.add_seasonality(name='conditional_weekly', period=7, fourier_order=3,
+                          prior_scale=2., condition_name='is_conditional_week')
+        m.add_seasonality(name='normal_monthly', period=30.5, fourier_order=5,
+                          prior_scale=2.)
+        df = DATA.copy()
+        with self.assertRaises(ValueError):
+            # Require all conditions names in df
+            m.fit(df)
+        df['is_conditional_week'] = [0] * 255 + [2] * 255
+        with self.assertRaises(ValueError):
+            # Require boolean compatible values
+            m.fit(df)
+        df['is_conditional_week'] = [0] * 255 + [1] * 255
+        m.fit(df)
+        self.assertEqual(
+            m.seasonalities['conditional_weekly'],
+            {
+                'period': 7,
+                'fourier_order': 3,
+                'prior_scale': 2.,
+                'mode': 'additive',
+                'condition_name': 'is_conditional_week'
+            },
+        )
+        self.assertIsNone(m.seasonalities['normal_monthly']['condition_name'])
+        seasonal_features, prior_scales, component_cols, modes = (
+            m.make_all_seasonality_features(m.history)
+        )
+        # Confirm that only values without is_conditional_week has non zero entries
+        conditional_weekly_columns = seasonal_features.columns[
+            seasonal_features.columns.str.startswith('conditional_weekly')]
+        self.assertTrue(np.array_equal((seasonal_features[conditional_weekly_columns] != 0).any(axis=1).values,
+                                       df['is_conditional_week'].values))
 
     def test_added_regressors(self):
         m = Prophet()
@@ -665,7 +786,7 @@ class TestProphet(TestCase):
         self.assertAlmostEqual(
             fcst['additive_terms'][0],
             fcst['yearly'][0] + fcst['weekly'][0]
-                + fcst['extra_regressors_additive'][0],
+            + fcst['extra_regressors_additive'][0],
         )
         self.assertAlmostEqual(
             fcst['multiplicative_terms'][0],
@@ -674,7 +795,7 @@ class TestProphet(TestCase):
         self.assertAlmostEqual(
             fcst['yhat'][0],
             fcst['trend'][0] * (1 + fcst['multiplicative_terms'][0])
-                + fcst['additive_terms'][0],
+            + fcst['additive_terms'][0],
         )
         # Check works if constant extra regressor at 0
         df['constant_feature'] = 0
@@ -725,5 +846,5 @@ class TestProphet(TestCase):
             {'weekly', 'yearly', 'xmas', 'numeric_feature',
              'multiplicative_terms', 'extra_regressors_multiplicative',
              'holidays',
-            },
+             },
         )
